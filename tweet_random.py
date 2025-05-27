@@ -1,6 +1,6 @@
 import random
 import time
-from your_bot_module import TwitterBot  # Or keep full code here
+from tweet import TwitterBot  # Or keep full code here
 
 # 25% chance to tweet
 if random.random() < 0.25:
