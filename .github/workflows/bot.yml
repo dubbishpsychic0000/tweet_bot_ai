@@ -6,7 +6,7 @@ on:
   # Schedule each script separately:
   # → tweet.py every 30 minutes (minutes 0 & 30)
   schedule:
-    - cron: '*/30 * * * *'   # At minute 0 and 30 every hour UTC → run tweet.py
+    - cron: '0 * * * *'   # At minute 0 and 30 every hour UTC → run tweet.py
   # → like.py at minute 0 every hour
     - cron: '0 * * * *'      # At minute 0 each hour UTC → run like.py
   # → reply.py at minute 15 and 45 every hour
