@@ -1,60 +1,135 @@
-# tweet_from_gemini.py
-
-import os, logging
+import time
+import sqlite3
+import logging
 import tweepy
-from google import genai
+import random
+from schedule import every, run_pending
 from dotenv import load_dotenv
+import os
+from google import genai
 
-# ─── Load environment variables ─────────────────────────────────────────────────
+# ──────── Load environment variables ──────────────────────────────────────────
 load_dotenv()
-TW_BEARER_TOKEN  = os.getenv("TWITTER_BEARER_TOKEN")
-TW_API_KEY       = os.getenv("TWITTER_API_KEY")
-TW_API_SECRET    = os.getenv("TWITTER_API_SECRET")
-TW_ACCESS_TOKEN  = os.getenv("TWITTER_ACCESS_TOKEN")
-TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_SECRET")
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 
-# ─── Logging ─────────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY")
+BEARER_TOKEN      = os.getenv("TWITTER_BEARER_TOKEN")
+CONSUMER_KEY      = os.getenv("TWITTER_API_KEY")
+CONSUMER_SECRET   = os.getenv("TWITTER_API_SECRET")
+ACCESS_TOKEN      = os.getenv("TWITTER_ACCESS_TOKEN")
+ACCESS_SECRET     = os.getenv("TWITTER_ACCESS_SECRET")
 
-# ─── Setup Gemini ────────────────────────────────────────────────────────────────
-def generate_tweet():
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+missing = [name for name, val in [
+    ("GEMINI_API_KEY", GEMINI_API_KEY),
+    ("TWITTER_BEARER_TOKEN", BEARER_TOKEN),
+    ("TWITTER_API_KEY", CONSUMER_KEY),
+    ("TWITTER_API_SECRET", CONSUMER_SECRET),
+    ("TWITTER_ACCESS_TOKEN", ACCESS_TOKEN),
+    ("TWITTER_ACCESS_SECRET", ACCESS_SECRET),
+] if not val]
+if missing:
+    raise RuntimeError(f"Missing environment variables: {missing}")
 
-    prompt = "Generate a short, witty, and engaging tweet about Python programming."
-    logging.info("Sending prompt to Gemini...")
-    try:
-        response = model.generate_content(prompt)
-        tweet = response.text.strip()
-        if len(tweet) > 280:
-            tweet = tweet[:277] + "..."
-        logging.info(f"Generated tweet: {tweet}")
-        return tweet
-    except Exception as e:
-        logging.error(f"Error generating tweet with Gemini: {e}")
-        return None
+# ──────── Logging setup ────────────────────────────────────────────────────────
+def setup_logging():
+    logging.basicConfig(
+        filename='twitter_bot.log',
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s'
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger('').addHandler(console)
 
-# ─── Tweet Posting Function ──────────────────────────────────────────────────────
-def post_tweet(tweet):
-    try:
-        client = tweepy.Client(
-            bearer_token=TW_BEARER_TOKEN,
-            consumer_key=TW_API_KEY,
-            consumer_secret=TW_API_SECRET,
-            access_token=TW_ACCESS_TOKEN,
-            access_token_secret=TW_ACCESS_SECRET
+# ──────── Database setup ───────────────────────────────────────────────────────
+def setup_db():
+    conn = sqlite3.connect('history.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tweets (
+            id TEXT PRIMARY KEY
         )
-        client.create_tweet(text=tweet)
-        logging.info("Tweet posted successfully!")
-    except Exception as e:
-        logging.error(f"Error posting tweet: {e}")
+    ''')
+    conn.commit()
+    return conn, cursor
 
-# ─── Main ────────────────────────────────────────────────────────────────────────
-def main():
-    tweet = generate_tweet()
-    if tweet:
-        post_tweet(tweet)
+# ──────── Gemini prompt ────────────────────────────────────────────────────────
+MOODS = ["sad", "happy", "funny", "reflective", "cynical", "poetic", "numb"]
 
-if __name__ == "__main__":
-    main()
+BASE_PROMPT = """Write a tweet as a thoughtful, emotionally-aware human who reads philosophy and fiction...
+
+Mood: {mood}
+"""
+
+class GeminiClient:
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise RuntimeError("Gemini API key is missing.")
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = "gemini-2.0-flash"
+
+    def generate(self, prompt: str = None) -> str:
+        if prompt is None:
+            mood = random.choice(MOODS)
+            prompt_payload = BASE_PROMPT.format(mood=mood)
+        else:
+            prompt_payload = prompt
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt_payload
+            )
+            return response.text.strip()
+        except Exception as e:
+            logging.error(f"Gemini generate error: {e}")
+            return ""
+
+class TwitterBot:
+    def __init__(self):
+        setup_logging()
+        self.conn, self.cursor = setup_db()
+
+        self.client = tweepy.Client(
+            bearer_token=BEARER_TOKEN,
+            consumer_key=CONSUMER_KEY,
+            consumer_secret=CONSUMER_SECRET,
+            access_token=ACCESS_TOKEN,
+            access_token_secret=ACCESS_SECRET,
+            wait_on_rate_limit=True
+        )
+
+        me = self.client.get_me()
+        self.user_id = me.data['id'] if isinstance(me.data, dict) else me.data.id
+
+        self.gemini = GeminiClient(GEMINI_API_KEY)
+        logging.info(f"Bot initialized for user ID {self.user_id}")
+
+    def post_tweet(self, text: str):
+        if not text:
+            logging.warning("Empty tweet text, skipping post.")
+            return None
+        try:
+            resp = self.client.create_tweet(text=text)
+            tid = str(resp.data['id'])
+            logging.info(f"Posted tweet {tid}: {text!r}")
+            self.cursor.execute('INSERT OR IGNORE INTO tweets(id) VALUES(?)', (tid,))
+            self.conn.commit()
+            return tid
+        except Exception as e:
+            logging.error(f"Post error: {e}")
+            return None
+
+    def run(self):
+        first_tweet = self.gemini.generate()
+        self.post_tweet(first_tweet)
+
+        every(60).minutes.do(lambda: self.post_tweet(self.gemini.generate()))
+
+        logging.info("Starting scheduled tasks. Press Ctrl+C to exit.")
+        while True:
+            run_pending()
+            time.sleep(5)
+
+if __name__ == '__main__':
+    TwitterBot().run()
