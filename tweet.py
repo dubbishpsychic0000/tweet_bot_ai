@@ -1,8 +1,9 @@
-# like.py
+# tweet_from_gemini.py
 
-import os, logging, sqlite3, tweepy, time
+import os, logging
+import tweepy
+from google import genai
 from dotenv import load_dotenv
-from google import genai  # Only needed if you want to generate comments (not used here)
 
 # ─── Load environment variables ─────────────────────────────────────────────────
 load_dotenv()
@@ -11,36 +12,49 @@ TW_API_KEY       = os.getenv("TWITTER_API_KEY")
 TW_API_SECRET    = os.getenv("TWITTER_API_SECRET")
 TW_ACCESS_TOKEN  = os.getenv("TWITTER_ACCESS_TOKEN")
 TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_SECRET")
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 
-# ─── Basic logging ────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+# ─── Logging ─────────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def main():
-    client = tweepy.Client(
-        bearer_token=TW_BEARER_TOKEN,
-        consumer_key=TW_API_KEY,
-        consumer_secret=TW_API_SECRET,
-        access_token=TW_ACCESS_TOKEN,
-        access_token_secret=TW_ACCESS_SECRET,
-        wait_on_rate_limit=True
-    )
-    me = client.get_me()
-    user_id = me.data['id'] if isinstance(me.data, dict) else me.data.id
-    logging.info(f"like.py running for user {user_id}")
+# ─── Setup Gemini ────────────────────────────────────────────────────────────────
+def generate_tweet():
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-pro')
 
-    query = "#python -is:retweet lang:en"
+    prompt = "Generate a short, witty, and engaging tweet about Python programming."
+    logging.info("Sending prompt to Gemini...")
     try:
-        search_resp = client.search_recent_tweets(query=query, max_results=3)
-        tweets = search_resp.data or []
-        for t in tweets:
-            try:
-                client.like(user_id, t.id)
-                logging.info(f"Liked tweet {t.id}")
-                time.sleep(2)
-            except Exception as e:
-                logging.error(f"Like error for {t.id}: {e}")
+        response = model.generate_content(prompt)
+        tweet = response.text.strip()
+        if len(tweet) > 280:
+            tweet = tweet[:277] + "..."
+        logging.info(f"Generated tweet: {tweet}")
+        return tweet
     except Exception as e:
-        logging.error(f"Search error: {e}")
+        logging.error(f"Error generating tweet with Gemini: {e}")
+        return None
+
+# ─── Tweet Posting Function ──────────────────────────────────────────────────────
+def post_tweet(tweet):
+    try:
+        client = tweepy.Client(
+            bearer_token=TW_BEARER_TOKEN,
+            consumer_key=TW_API_KEY,
+            consumer_secret=TW_API_SECRET,
+            access_token=TW_ACCESS_TOKEN,
+            access_token_secret=TW_ACCESS_SECRET
+        )
+        client.create_tweet(text=tweet)
+        logging.info("Tweet posted successfully!")
+    except Exception as e:
+        logging.error(f"Error posting tweet: {e}")
+
+# ─── Main ────────────────────────────────────────────────────────────────────────
+def main():
+    tweet = generate_tweet()
+    if tweet:
+        post_tweet(tweet)
 
 if __name__ == "__main__":
     main()
