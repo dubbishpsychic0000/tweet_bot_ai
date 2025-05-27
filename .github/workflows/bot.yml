@@ -1,6 +1,6 @@
 # .github/workflows/bot.yml
 
-name: Twitter-Gemini Bot
+name: tweet_bot_ai
 
 on:
   # Schedule each script separately:
